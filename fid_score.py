@@ -15,8 +15,11 @@ samples respectively.
 
 See --help to see further details.
 
-Code apapted from https://github.com/bioinf-jku/TTUR to use PyTorch instead
-of Tensorflow
+Code apapted from https://github.com/mseitzer/pytorch-fid to use MXNet instead
+of PyTorch
+
+This code was istelf apapted from https://github.com/bioinf-jku/TTUR to use PyTorch
+instead of Tensorflow
 
 Copyright 2018 Institute of Bioinformatics, JKU Linz
 
@@ -37,10 +40,9 @@ import pathlib
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
 import numpy as np
-import torch
+import mxnet as mx
 from scipy import linalg
 from scipy.misc import imread
-from torch.nn.functional import adaptive_avg_pool2d
 
 try:
     from tqdm import tqdm
@@ -54,18 +56,17 @@ parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
 parser.add_argument('path', type=str, nargs=2,
                     help=('Path to the generated images or '
                           'to .npz statistic files'))
-parser.add_argument('--batch-size', type=int, default=50,
+parser.add_argument('--batch-size', type=int, default=24,
                     help='Batch size to use')
 parser.add_argument('--dims', type=int, default=2048,
                     choices=list(InceptionV3.BLOCK_INDEX_BY_DIM),
                     help=('Dimensionality of Inception features to use. '
                           'By default, uses pool3 features'))
-parser.add_argument('-c', '--gpu', default='', type=str,
-                    help='GPU to use (leave blank for CPU only)')
+parser.add_argument('--gpu', action='store_true',
+                    help='whether to use gpu or not')
 
 
-def get_activations(files, model, batch_size=50, dims=2048,
-                    cuda=False, verbose=False):
+def get_activations(files, model, ctx, batch_size=50, dims=2048, verbose=False):
     """Calculates the activations of the pool_3 layer for all images.
 
     Params:
@@ -77,7 +78,6 @@ def get_activations(files, model, batch_size=50, dims=2048,
                      behavior is retained to match the original FID score
                      implementation.
     -- dims        : Dimensionality of features returned by Inception
-    -- cuda        : If set to True, use GPU
     -- verbose     : If set to True and parameter out_step is given, the number
                      of calculated batches is reported.
     Returns:
@@ -85,7 +85,6 @@ def get_activations(files, model, batch_size=50, dims=2048,
        activations of the given tensor when feeding inception with the
        query tensor.
     """
-    model.eval()
 
     if len(files) % batch_size != 0:
         print(('Warning: number of images is not a multiple of the '
@@ -114,18 +113,9 @@ def get_activations(files, model, batch_size=50, dims=2048,
         images = images.transpose((0, 3, 1, 2))
         images /= 255
 
-        batch = torch.from_numpy(images).type(torch.FloatTensor)
-        if cuda:
-            batch = batch.cuda()
-
+        batch = mx.nd.array(images, ctx=ctx)
         pred = model(batch)[0]
-
-        # If model output is not scalar, apply global spatial average pooling.
-        # This happens if you choose a dimensionality not equal 2048.
-        if pred.shape[2] != 1 or pred.shape[3] != 1:
-            pred = adaptive_avg_pool2d(pred, output_size=(1, 1))
-
-        pred_arr[start:end] = pred.cpu().data.numpy().reshape(batch_size, -1)
+        pred_arr[start:end] = pred.asnumpy().reshape(batch_size, -1)
 
     if verbose:
         print(' done')
@@ -190,17 +180,17 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
             np.trace(sigma2) - 2 * tr_covmean)
 
 
-def calculate_activation_statistics(files, model, batch_size=50,
-                                    dims=2048, cuda=False, verbose=False):
+def calculate_activation_statistics(files, model, ctx, batch_size=50,
+                                    dims=2048, verbose=False):
     """Calculation of the statistics used by the FID.
     Params:
     -- files       : List of image files paths
     -- model       : Instance of inception model
+    -- ctx       : mxnet context (gpu or cpu)
     -- batch_size  : The images numpy array is split into batches with
                      batch size batch_size. A reasonable batch size
                      depends on the hardware.
     -- dims        : Dimensionality of features returned by Inception
-    -- cuda        : If set to True, use GPU
     -- verbose     : If set to True and parameter out_step is given, the
                      number of calculated batches is reported.
     Returns:
@@ -209,13 +199,13 @@ def calculate_activation_statistics(files, model, batch_size=50,
     -- sigma : The covariance matrix of the activations of the pool_3 layer of
                the inception model.
     """
-    act = get_activations(files, model, batch_size, dims, cuda, verbose)
+    act = get_activations(files, model, ctx, batch_size, dims, verbose)
     mu = np.mean(act, axis=0)
     sigma = np.cov(act, rowvar=False)
     return mu, sigma
 
 
-def _compute_statistics_of_path(path, model, batch_size, dims, cuda):
+def _compute_statistics_of_path(path, model, ctx, batch_size, dims):
     if path.endswith('.npz'):
         f = np.load(path)
         m, s = f['mu'][:], f['sigma'][:]
@@ -223,13 +213,12 @@ def _compute_statistics_of_path(path, model, batch_size, dims, cuda):
     else:
         path = pathlib.Path(path)
         files = list(path.glob('*.jpg')) + list(path.glob('*.png'))
-        m, s = calculate_activation_statistics(files, model, batch_size,
-                                               dims, cuda)
+        m, s = calculate_activation_statistics(files, model, ctx, batch_size, dims)
 
     return m, s
 
 
-def calculate_fid_given_paths(paths, batch_size, cuda, dims):
+def calculate_fid_given_paths(paths, batch_size, ctx, dims):
     """Calculates the FID of two paths"""
     for p in paths:
         if not os.path.exists(p):
@@ -237,14 +226,10 @@ def calculate_fid_given_paths(paths, batch_size, cuda, dims):
 
     block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
 
-    model = InceptionV3([block_idx])
-    if cuda:
-        model.cuda()
+    model = InceptionV3(ctx, [block_idx])
 
-    m1, s1 = _compute_statistics_of_path(paths[0], model, batch_size,
-                                         dims, cuda)
-    m2, s2 = _compute_statistics_of_path(paths[1], model, batch_size,
-                                         dims, cuda)
+    m1, s1 = _compute_statistics_of_path(paths[0], model, ctx, batch_size, dims)
+    m2, s2 = _compute_statistics_of_path(paths[1], model, ctx, batch_size, dims)
     fid_value = calculate_frechet_distance(m1, s1, m2, s2)
 
     return fid_value
@@ -252,10 +237,11 @@ def calculate_fid_given_paths(paths, batch_size, cuda, dims):
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+
+    ctx = mx.gpu() if args.gpu else mx.cpu()
 
     fid_value = calculate_fid_given_paths(args.path,
                                           args.batch_size,
-                                          args.gpu != '',
+                                          ctx,
                                           args.dims)
     print('FID: ', fid_value)
