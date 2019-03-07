@@ -42,6 +42,8 @@ You can select the dimensionality of features to use with the flag `--dims N`, w
 The choices are:
 - 64:   first max pooling features
 - 192:  second max pooling featurs
+- 768:  third max pooling featurs
+- 1280: fourth max pooling featurs
 - 2048: final average pooling features (this is the default)
 
 ## License

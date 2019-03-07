@@ -7,13 +7,15 @@ class InceptionV3(mx.gluon.Block):
 
     # Index of default block of inception to return,
     # corresponds to output of final average pooling
-    DEFAULT_BLOCK_INDEX = 2
+    DEFAULT_BLOCK_INDEX = 4
 
     # Maps feature dimensionality to their output blocks indices
     BLOCK_INDEX_BY_DIM = {
         64: 0,   # First max pooling features
         192: 1,  # Second max pooling featurs
-        2048: 2  # Final average pooling features
+        768: 2,  # Third max pooling featurs
+        1280: 3,  # Fourth max pooling featurs
+        2048: 4  # Final average pooling features
     }
 
     def __init__(self,
@@ -30,7 +32,9 @@ class InceptionV3(mx.gluon.Block):
             Indices of blocks to return features of. Possible values are:
                 - 0: corresponds to output of first max pooling
                 - 1: corresponds to output of second max pooling
-                - 2: corresponds to output of final average pooling
+                - 2: corresponds to output of third max pooling
+                - 3: corresponds to output of fourth max pooling
+                - 4: corresponds to output of final average pooling
         resize_input : bool
             If true, bilinearly resizes input to width and height 299 before
             feeding input to model. As the network without fully connected
@@ -51,42 +55,37 @@ class InceptionV3(mx.gluon.Block):
         self.output_blocks = sorted(output_blocks)
         self.last_needed_block = max(output_blocks)
 
-        assert self.last_needed_block <= 2, \
-            'Last possible output block index is 2'
+        assert self.last_needed_block <= 4, \
+            'Last possible output block index is 4'
 
         self.blocks = list()
 
-        # based on this discussion: https://discuss.mxnet.io/t/gluon-pretrained-model-layer-access-and-usage/772/2
         inception = gcv.model_zoo.get_model('inceptionv3', pretrained=True)
         inception.collect_params().reset_ctx(self.ctx)
         inception.hybridize()
-        inception(mx.nd.ones((1, 3, 512, 512), ctx=self.ctx))
-        inception.export('inception')
-        sym = mx.sym.load('inception-symbol.json')
 
         # Block 0: input to maxpool1
-        block0_sym = sym.get_internals()['inception30_pool0_fwd_output']
-        block0 = mx.gluon.nn.SymbolBlock(outputs=block0_sym, inputs=mx.sym.var('data'))
-        block0.collect_params().load('inception-0000.params', ctx=self.ctx, ignore_extra=True)
-        self.blocks.append(block0)
+        self.blocks.append(inception.features[0:4])
 
         # Block 1: maxpool1 to maxpool2
         if self.last_needed_block < 1:
             return
+        self.blocks.append(inception.features[4:7])
 
-        block1_sym = sym.get_internals()['inception30_pool1_fwd_output']
-        block1 = mx.gluon.nn.SymbolBlock(outputs=block1_sym, inputs=mx.sym.var('data'))
-        block1.collect_params().load('inception-0000.params', ctx=self.ctx, ignore_extra=True)
-        self.blocks.append(block1)
-
-        # Block 2: aux classifier to final avgpool
+        # Block 2: maxpool2 to maxpool3
         if self.last_needed_block < 2:
             return
+        self.blocks.append(inception.features[7:11])
 
-        block2_sym = sym.get_internals()['inception30_pool2_fwd_output']
-        block2 = mx.gluon.nn.SymbolBlock(outputs=block2_sym, inputs=mx.sym.var('data'))
-        block2.collect_params().load('inception-0000.params', ctx=self.ctx, ignore_extra=True)
-        self.blocks.append(block2)
+        # Block 3: maxpool3 to maxpool4
+        if self.last_needed_block < 3:
+            return
+        self.blocks.append(inception.features[11:16])
+
+        # Block 4: aux classifier to final avgpool
+        if self.last_needed_block < 4:
+            return
+        self.blocks.append(inception.features[16:19])
 
 
     def forward(self, inp):
@@ -115,9 +114,9 @@ class InceptionV3(mx.gluon.Block):
         if self.normalize_input:
             x = 2 * x - 1  # Scale from range (0, 1) to range (-1, 1)
 
-        x_init = x
+
         for idx, block in enumerate(self.blocks):
-            x = block(x_init)
+            x = block(x)
             if idx in self.output_blocks:
                 outp.append(x)
 
