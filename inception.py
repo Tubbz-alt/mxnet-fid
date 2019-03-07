@@ -118,7 +118,7 @@ class InceptionV3(mx.gluon.Block):
         for idx, block in enumerate(self.blocks):
             x = block(x)
             if idx in self.output_blocks:
-                outp.append(x)
+                outp.append(mx.nd.mean(x, (-1,-2), keepdims=True))
 
             if idx == self.last_needed_block:
                 break
